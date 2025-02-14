@@ -2,6 +2,8 @@ import time
 import tkinter as tk
 import rsa
 import hashlib
+import json
+from flask import Flask, jsonify, request
 from tkinter import messagebox
 
 
@@ -29,6 +31,25 @@ def calculate_merkle_root(transactions):
     return transactions[0]  # Соңғы қалған хэш - Меркл рут
 
 
+# Түйін (Node) құрылымы
+class Node:
+    def __init__(self, node_id):
+        self.node_id = node_id
+        self.blockchain = Blockchain()
+        self.peers = []  # Байланысты түйіндер
+
+    def connect_peer(self, peer):
+        self.peers.append(peer)
+
+    def broadcast_block(self, block):
+        for peer in self.peers:
+            peer.receive_block(block)
+
+    def receive_block(self, block):
+        if self.blockchain.validate_block(block):
+            self.blockchain.add_block(block)
+
+
 # Транзакция Класы: Транзакция мәліметтерін сақтайды
 class Transaction:
     def __init__(self, sender, receiver, amount):
@@ -43,17 +64,18 @@ class Transaction:
         tx_string = f"{self.sender}{self.receiver}{self.amount}{self.timestamp}"
         return simple_hash(tx_string)
 
+
 class Wallet:
     def __init__(self):
         self.public_key, self.private_key = rsa.newkeys(512)  # RSA кілттерін генерациялау
-        self.balance = 100  # Бастапқы баланс
+        self.balance = 100
         self.address = self.get_address_from_public_key()  # Ашық кілттің хэшін аккаунт адресі ретінде қолдану
 
     def get_address_from_public_key(self):
         """Ашық кілттің хэшін алу (аккаунт адресі ретінде қолдану)"""
         public_key_bytes = self.public_key.save_pkcs1()  # Ашық кілтті байттар түрінде алу
         public_key_hash = hashlib.sha256(public_key_bytes).hexdigest()  # Хэштеу
-        return public_key_hash  # Адрес ретінде хэш қайтарылады
+        return public_key_hash
 
     def sign_transaction(self, transaction_data):
         """Сандық қолтаңба жасау"""
@@ -76,6 +98,7 @@ class Wallet:
             return rsa.decrypt(encrypted_data, self.private_key).decode()
         except rsa.DecryptionError:
             return "Дешифрлау қатесі"
+
 
 # Блок Класы: Блок мәліметтері және хэштеу мен тексеру әдістері
 class Block:
@@ -109,44 +132,136 @@ print(f"Генезис Блок Хэші: {genesis_block.hash}")
 # Блокчейн Класы: Блоктарды басқару және оларды қосу
 class Blockchain:
     def __init__(self):
-        self.chain = [genesis_block]
-        self.pending_transactions = []  # Қосылатын транзакциялардың тізімі
-        self.utxo_set = set()  # UTXO жиыны (пайдаланылмаған транзакция шығымы)
+        self.chain = []
+        self.transactions = []
+        # Бірінші блокты құру
+        self.create_block(previous_hash='1', proof=100)
 
-    def add_block(self, block):
+    def create_block(self, proof, previous_hash):
+        block = {
+            'index': len(self.chain) + 1,
+            'timestamp': time.time(),
+            'transactions': self.transactions,
+            'proof': proof,
+            'previous_hash': previous_hash
+        }
+        # Жаңа блок қосылғаннан кейін, транзакциялар тізімін босату
+        self.transactions = []
         self.chain.append(block)
+        return block
 
-    def create_new_block(self, data):
-        # Жаңа блок құрып, барлық күтіп тұрған транзакцияларды оған қосу
-        last_block = self.chain[-1]
-        new_block = Block(len(self.chain), time.time(), data, last_block.hash)
-        for tx in self.pending_transactions:
-            new_block.add_transaction(tx)
-            self.update_utxo(tx)  # UTXO жиынын жаңарту
-        self.add_block(new_block)
-        self.pending_transactions = []  # Транзакциялар тізімін тазалау
-        return new_block  # Жаңа блокты қайтарамыз
+    def get_previous_block(self):
+        return self.chain[-1]
 
-    def add_pending_transaction(self, transaction):
-        # Күтіп тұрған транзакцияны қосу
-        self.pending_transactions.append(transaction)
+    def proof_of_work(self, previous_proof):
+        new_proof = 1
+        check_proof = False
+        # Proof of work алгоритмін орындау
+        while not check_proof:
+            hash_operation = hashlib.sha256(str(new_proof ** 2 - previous_proof ** 2).encode()).hexdigest()
+            if hash_operation[:4] == '0000':
+                check_proof = True
+            else:
+                new_proof += 1
+        return new_proof
 
-    def validate_chain(self):
-        # Блокчейнді тексеру: әр блоктың алдыңғы хэші алдыңғы блоктың хэшіне сәйкес келуі керек
-        for i in range(1, len(self.chain)):
-            if self.chain[i].prev_hash != self.chain[i - 1].hash:
-                return False
-            if self.chain[i].calculate_hash() != self.chain[i].hash:
-                return False
-        return True
+    def hash(self, block):
+        return hashlib.sha256(json.dumps(block, sort_keys=True).encode()).hexdigest()
 
-    def update_utxo(self, transaction):
-        # Утилитаға арналған функция: транзакцияларды UTXO жиынына қосу
-        self.utxo_set.add(transaction.tx_hash)
+    def add_transaction(self, sender, receiver, amount):
+        self.transactions.append({
+            'sender': sender,
+            'receiver': receiver,
+            'amount': amount
+        })
+        # Транзакция қосылған соң, келесі блок индексі қайтарылады
+        return self.get_previous_block()['index'] + 1
 
+
+app = Flask(__name__)
+
+
+@app.route('/')
+def home():
+    return "Welcome to the Blockchain Server!"  # Негізгі бет
+
+
+@app.route('/blockchain')
+def blockchain():
+    return "Blockchain functionality will go here."
+
+
+app.config['DEBUG'] = True  # Даму режимін қосу
 
 # Блокчейнді жасау
 blockchain = Blockchain()
+
+
+# 4
+@app.route('/mine_block', methods=['GET'])
+def mine_block():
+    previous_block = blockchain.get_previous_block()
+    previous_proof = previous_block['proof']
+    proof = blockchain.proof_of_work(previous_proof)
+    previous_hash = blockchain.hash(previous_block)
+
+    # Транзакция қосу
+    blockchain.add_transaction(sender="0", receiver="node_address", amount=1)
+
+    # Жаңа блокты жасау
+    block = blockchain.create_block(proof, previous_hash)
+    response = {
+        'message': 'Түйін жаңа блокты қосты',
+        'index': block['index'],
+        'timestamp': block['timestamp'],
+        'transactions': block['transactions'],
+        'proof': block['proof'],
+        'previous_hash': block['previous_hash']
+    }
+    return jsonify(response), 200
+
+
+@app.route('/send_transaction', methods=['POST'])
+def send_transaction():
+    data = request.get_json()
+
+    # Деректерді тексеру
+    if 'sender' not in data or 'receiver' not in data or 'amount' not in data:
+        return jsonify({'error': 'Missing data'}), 400
+
+    sender = data['sender']
+    receiver = data['receiver']
+    amount = data['amount']
+
+    if amount <= 0:
+        return jsonify({'error': 'Amount must be greater than 0'}), 400
+
+
+@app.route('/explorer', methods=['GET'])
+def explorer():
+    chain = blockchain.chain
+    blocks_info = []
+
+    for block in chain:
+        blocks_info.append({
+            'index': block['index'],
+            'timestamp': block['timestamp'],
+            'transactions': block['transactions'],
+            'proof': block['proof'],
+            'previous_hash': block['previous_hash']
+        })
+
+    return jsonify(blocks_info), 200
+
+
+# Блоктарды көрсету үшін API қосу
+@app.route('/get_chain', methods=['GET'])
+def get_chain():
+    response = {
+        'chain': blockchain.chain,
+        'length': len(blockchain.chain)
+    }
+    return jsonify(response), 200
 
 
 # Блокчейн Құрастырушысын GUI арқылы көрсету
@@ -240,6 +355,7 @@ class BlockchainExplorer(tk.Tk):
 
         self.block_info_label.config(text=block_info)
 
+
 class WalletGUI:
     def __init__(self, root):
         self.wallet = Wallet()
@@ -289,7 +405,7 @@ class WalletGUI:
 
         # Верификация жасау (өзіне тексеру)
         if self.wallet.verify_transaction(transaction_data, signature, self.wallet.public_key):
-            # Шифрлау мысалы
+
             encrypted_transaction = self.wallet.encrypt_data(transaction_data)
             decrypted_transaction = self.wallet.decrypt_data(encrypted_transaction)
 
@@ -302,10 +418,13 @@ class WalletGUI:
         else:
             messagebox.showerror("Қате", "Транзакция расталмады!")
 
+
 # GUI-ді іске қосу
 if __name__ == "__main__":
     root = tk.Tk()
     gui = WalletGUI(root)
     root.mainloop()
+    app.run(host='0.0.0.0', port=5000)
+    app.run(debug=True)
 app = BlockchainExplorer(blockchain)
 app.mainloop()
