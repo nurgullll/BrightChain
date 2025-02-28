@@ -1,13 +1,22 @@
+import threading
 import time
 import tkinter as tk
+import requests
 import rsa
 import hashlib
+import random
 import json
 from flask import Flask, jsonify, request
 from tkinter import messagebox
+import multiprocessing
+
+# Хэш функциясын анықтау
+"""def calculate_block_hash1(index, timestamp, transactions, previous_hash, nonce):
+    block_string = f"{index}{timestamp}{transactions}{previous_hash}{nonce}"
+    return hashlib.sha256(block_string.encode('utf-8')).hexdigest() """
 
 
-# Қарапайым хэш алгоритмі (XOR негізінде)
+# Қарапайым хэш
 def simple_hash(input_data):
     hash_value = 0
     for byte in input_data.encode('utf-8'):
@@ -15,28 +24,39 @@ def simple_hash(input_data):
     return hex(hash_value)
 
 
-# Меркл ағашының тамырын есептейтін функция
-def calculate_merkle_root(transactions):
-    if not transactions:
+def calculate_merkle_root(transactions1):
+    if not transactions1:
         return "0"
 
-    while len(transactions) > 1:
-        # Егер транзакция саны тақ болса, соңғы элементті қайтадан қосамыз
-        if len(transactions) % 2 != 0:
-            transactions.append(transactions[-1])
+    while len(transactions1) > 1:
+        if len(transactions1) % 2 != 0:
+            transactions1.append(transactions1[-1])
+        transactions1 = [simple_hash(transactions1[i] + transactions1[i + 1]) for i in range(0, len(transactions1), 2)]
 
-        # Жұп-жұп хэштерді біріктіріп жаңа хэштерді есептейміз
-        transactions = [simple_hash(transactions[i] + transactions[i + 1]) for i in range(0, len(transactions), 2)]
-
-    return transactions[0]  # Соңғы қалған хэш - Меркл рут
+    return transactions1[0]
 
 
-# Түйін (Node) құрылымы
-class Node:
-    def __init__(self, node_id):
+def miner_process(self, miner_address):
+    max_blocks = 10
+    mined_blocks = 0
+
+    while mined_blocks < max_blocks:
+        if self.pending_transactions:
+            new_block = self.mine_pending_transactions(miner_address)
+            print(f"Miner {miner_address} mined Block {new_block.index}!")
+            mined_blocks += 1
+        time.sleep(random.randint(2, 5))
+
+    # Түйін (Node) құрылымы
+
+
+class Node(multiprocessing.Process):
+    def __init__(self, node_id, difficulty1, queue):
+        super().__init__()
         self.node_id = node_id
-        self.blockchain = Blockchain()
-        self.peers = []  # Байланысты түйіндер
+        self.blockchain = Blockchain(difficulty1)
+        self.peers = []
+        self.queue = queue  # Кезек арқылы байланысу
 
     def connect_peer(self, peer):
         self.peers.append(peer)
@@ -49,8 +69,20 @@ class Node:
         if self.blockchain.validate_block(block):
             self.blockchain.add_block(block)
 
+    def run(self, block=None):
+        """Процесс ретінде түйінді іске қосу"""
+        while True:
+            if not self.queue.empty():
+                transaction = self.queue.get()
+                print(f"Түйін {self.node_id}: жаңа транзакция алды - {transaction}")
+                self.blockchain.add_transaction(transaction, amount=0, fee=0, recipient=0)
 
-# Транзакция Класы: Транзакция мәліметтерін сақтайды
+            time.sleep(5)  # Тауып жатқандай етіп күту
+            self.blockchain.mine_block()
+            self.broadcast_block(block)
+            print(f"Түйін {self.node_id}: жаңа блок тапты")
+
+
 class Transaction:
     def __init__(self, sender, receiver, amount):
         self.sender = sender
@@ -60,9 +92,16 @@ class Transaction:
         self.tx_hash = self.calculate_hash()
 
     def calculate_hash(self):
-        # Транзакция хэшін жасау: жіберуші, алушы, сома және уақыт таңбасы бойынша
         tx_string = f"{self.sender}{self.receiver}{self.amount}{self.timestamp}"
-        return simple_hash(tx_string)
+        return hashlib.sha256(tx_string.encode()).hexdigest()
+
+
+def verify_transaction(transaction_data, signature, sender_public_key):
+    """Транзакцияның шынайылығын тексеру"""
+    try:
+        return rsa.verify(transaction_data.encode(), signature, sender_public_key)
+    except rsa.VerificationError:
+        return False
 
 
 class Wallet:
@@ -73,7 +112,7 @@ class Wallet:
 
     def get_address_from_public_key(self):
         """Ашық кілттің хэшін алу (аккаунт адресі ретінде қолдану)"""
-        public_key_bytes = self.public_key.save_pkcs1()  # Ашық кілтті байттар түрінде алу
+        public_key_bytes = self.public_key.save_pkcs1()  # Ашық кілтті байттар түрінде алу
         public_key_hash = hashlib.sha256(public_key_bytes).hexdigest()  # Хэштеу
         return public_key_hash
 
@@ -81,16 +120,17 @@ class Wallet:
         """Сандық қолтаңба жасау"""
         return rsa.sign(transaction_data.encode(), self.private_key, 'SHA-1')
 
-    def verify_transaction(self, transaction_data, signature, sender_public_key):
-        """Транзакцияның шынайылығын тексеру"""
-        try:
-            return rsa.verify(transaction_data.encode(), signature, sender_public_key)
-        except rsa.VerificationError:
-            return False
-
     def encrypt_data(self, data):
         """Ашық кілтпен мәліметтерді шифрлау"""
         return rsa.encrypt(data.encode(), self.public_key)
+
+    def verify_transaction(self, transaction_data, signature):
+        """Транзакцияның қолтаңбасын тексеру"""
+        try:
+            rsa.verify(transaction_data.encode(), signature, self.public_key)
+            return True
+        except rsa.VerificationError:
+            return False
 
     def decrypt_data(self, encrypted_data):
         """Жеке кілтпен мәліметтерді дешифрлау"""
@@ -102,126 +142,259 @@ class Wallet:
 
 # Блок Класы: Блок мәліметтері және хэштеу мен тексеру әдістері
 class Block:
-    def __init__(self, index, timestamp, data, prev_hash):
-        self.index = index
-        self.timestamp = timestamp
-        self.data = data
-        self.prev_hash = prev_hash
-        self.transactions = []  # Транзакциялар тізімі
-        self.merkle_root = "0"  # Меркл рут бастапқыда 0 деп беріледі
-        self.hash = self.calculate_hash()
+    def __init__(self, index1, timestamp1, transactions1, previous_hash1, nonce1, difficulty1):
+        self.index = index1
+        self.previous_hash = previous_hash1
+        self.transactions = transactions1
+        self.timestamp = timestamp1
+        self.difficulty = difficulty1
+        self.nonce = nonce1
+        self.hash = self.compute_hash()
 
-    def calculate_hash(self):
-        # Барлық блоктың мәліметтерін біріктіріп хэш жасаймыз
-        block_string = f"{self.index}{self.timestamp}{self.data}{self.prev_hash}{self.merkle_root}"
-        return simple_hash(block_string)
+    def compute_hash(self):
+        block_string = f"{self.index}{self.previous_hash}{self.transactions}{self.timestamp}{self.nonce}"
+        return hashlib.sha256(block_string.encode()).hexdigest()
 
-    def add_transaction(self, transaction):
-        self.transactions.append(transaction)
-        # Транзакция қосылғаннан кейін Меркл рутты қайта есептеу
-        self.merkle_root = calculate_merkle_root([tx.tx_hash for tx in self.transactions])
-        # Блоктың хэшін қайта есептеу
-        self.hash = self.calculate_hash()
+    def __repr__(self):
+        return f"Block#{self.index} [Hash: {self.hash}]"
+
+    def mine_block(self):
+        """
+        Mine the block by finding a nonce that results in a hash meeting the difficulty criteria.
+        """
+        self.nonce = 0
+        computed_hash = self.compute_hash()
+        while not computed_hash.startswith('0' * self.difficulty):
+            self.nonce += 1
+            computed_hash = self.compute_hash()
+        return computed_hash
 
 
-# Генезис Блок (Блокчейннің бірінші блогы)
-genesis_block = Block(0, time.time(), "Генезис Блок", "0")
+# Генезис Блок (Блокчейннің бірінші блогы)
+genesis_transactions = []  # Транзакциялар тізімін бос деп алайық
+genesis_block = Block(0, time.time(), "Генезис Блок", "0", 0, 3)
+
 print(f"Генезис Блок Хэші: {genesis_block.hash}")
 
 
-# Блокчейн Класы: Блоктарды басқару және оларды қосу
-class Blockchain:
-    def __init__(self):
-        self.chain = []
-        self.transactions = []
-        # Бірінші блокты құру
-        self.create_block(previous_hash='1', proof=100)
+# Блокчейн Класы: Блоктарды басқару және оларды қосу
+def calculate_block_hash(block):
+    return hashlib.sha256(
+        f"{block.index}{block.timestamp}{block.transactions}{block.previous_hash}{block.nonce}".encode()).hexdigest()
 
-    def create_block(self, proof, previous_hash):
-        block = {
-            'index': len(self.chain) + 1,
-            'timestamp': time.time(),
-            'transactions': self.transactions,
-            'proof': proof,
-            'previous_hash': previous_hash
-        }
-        # Жаңа блок қосылғаннан кейін, транзакциялар тізімін босату
-        self.transactions = []
+
+class Blockchain:
+    def fork_resolution(self, new_chain):
+        """ Егер жаңа тізбек біздікінен ұзын болса, оны қабылдаймыз """
+        if len(new_chain) > len(self.chain):
+            self.chain = new_chain
+            print("⛓ Fork detected! Switching to the longest chain.")
+        else:
+            print("❌ New chain rejected. Keeping the current chain.")
+
+    def __init__(self, difficult, mining_reward=50):  # Жүлде мөлшерін параметр ретінде қосу
+        self.block_info_label = []
+        self.chain = []
+        self.current_transactions = []
+        self.difficult = difficult
+        self.mining_reward = mining_reward  # Жүлде мөлшерін анықтау
+        self.pending_transactions = []
+        self.nodes = set()
+        self.create_genesis_block()
+
+    def resolve_conflicts(self):
+        """
+        Resolve conflicts by replacing our chain with the longest one in the network.
+        """
+        neighbours = self.nodes
+        new_chain = None
+        max_length = len(self.chain)
+
+        for node in neighbours:
+            response = requests.get(f'http://{node}/chain')
+            if response.status_code == 200:
+                length = response.json()['length']
+                chain = response.json()['chain']
+                if length > max_length and self.valid_chain():
+                    max_length = length
+                    new_chain = chain
+
+        if new_chain:
+            self.chain = new_chain
+            return True
+
+        return False
+
+    def valid_chain(self):
+        """ Блокчейннің жарамдылығын тексеру """
+        for i in range(1, len(self.chain)):
+            prev_block = self.chain[i - 1]
+            curr_block = self.chain[i]
+
+            if curr_block.previous_hash != prev_block.hash:
+                return False  # Блоктардың байланысы дұрыс емес
+
+            if curr_block.hash != curr_block.compute_hash():
+                return False  # Блоктың хэші дұрыс емес
+
+        return True  # Барлық блоктар дұрыс
+
+    def create_genesis_block(self):
+        # Генезис блокты жасау
+        genesis_block1 = Block(0, time.time(), "Genesis Block", "0", 0, 3)
+        genesis_block1.mine_block()
+        self.chain.append(genesis_block1)
+
+    def mine_pending_transactions(self, miner_address):
+        block = Block(len(self.chain), self.chain[-1].hash, self.pending_transactions, time.time(), 0, 2)
+        block.mine_block()
         self.chain.append(block)
+        reward_transaction = {
+            'sender': 'Network',
+            'recipient': miner_address,
+            'amount': self.mining_reward + sum(tx['fee'] for tx in self.pending_transactions),
+            'fee': 0
+        }
+        self.pending_transactions = [reward_transaction]
         return block
 
-    def get_previous_block(self):
-        return self.chain[-1]
+    def mine_block(self):
+        last_block = self.chain[-1]
+        nonce1 = self.proof_of_work(last_block)
 
-    def proof_of_work(self, previous_proof):
-        new_proof = 1
-        check_proof = False
-        # Proof of work алгоритмін орындау
-        while not check_proof:
-            hash_operation = hashlib.sha256(str(new_proof ** 2 - previous_proof ** 2).encode()).hexdigest()
-            if hash_operation[:4] == '0000':
-                check_proof = True
-            else:
-                new_proof += 1
-        return new_proof
+        reward_transaction = {"sender": "system", "recipient": "miner", "amount": self.mining_reward}
+        self.current_transactions.append(reward_transaction)  # Жүлде транзакциясы
 
-    def hash(self, block):
+        # ✅ Дұрыс аргументтермен `Block` объектісін жасау
+        block = Block(len(self.chain), time.time(), last_block.hash, self.current_transactions, nonce1, 3)
+
+        self.chain.append(block)
+        self.current_transactions = []  # Жаңа транзакциялар қабылдауға дайын болу үшін тазалау
+        mined_hash = genesis_block.mine_block()
+        print(f"Майненген Генезис Блок Хэші: {mined_hash}")
+
+    def create_block(self, proof, previous_hash1):
+        block = Block(len(self.chain), previous_hash1, self.pending_transactions, self.difficult,
+                      proof, 3)  # 🔹 'nonce' ретінде 'proof' беріледі
+        self.chain.append(block)
+        self.pending_transactions = []  # Күтілетін транзакцияларды тазалау
+        return block
+
+    def add_block(self, new_block):
+        new_block.previous_hash = self.get_latest_block().hash
+        new_block.mine_block()
+        self.chain.append(new_block)
+
+    @staticmethod
+    def hash(block):
         return hashlib.sha256(json.dumps(block, sort_keys=True).encode()).hexdigest()
 
-    def add_transaction(self, sender, receiver, amount):
-        self.transactions.append({
+    def add_transaction(self, sender, recipient, amount, fee):
+        transaction = {
             'sender': sender,
-            'receiver': receiver,
-            'amount': amount
-        })
-        # Транзакция қосылған соң, келесі блок индексі қайтарылады
-        return self.get_previous_block()['index'] + 1
+            'recipient': recipient,
+            'amount': amount,
+            'fee': fee
+        }
+        self.pending_transactions.append(transaction)
+
+    def proof_of_work(self, last_block):
+        nonce1 = 0
+        while not self.valid_proof(last_block, nonce1):
+            nonce1 += 1
+        return nonce1
+
+    def validate_block(self, block):
+        """Блоктың жарамдылығын тексеру"""
+        last_block = self.get_latest_block()
+
+        # Блоктың алдыңғы хэші соңғы блоктың хэшімен сәйкес келе ме?
+        if block.previous_hash != last_block.hash:
+            return False
+
+        # Блоктың хэші дұрыс па?
+        if block.hash != calculate_block_hash(block):
+            return False
+
+        return True
+
+    def valid_proof(self, last_block, nonce1):
+        guess = f"{last_block.hash}{nonce1}"
+        guess_hash = hashlib.sha256(guess.encode()).hexdigest()
+        return guess_hash[:self.difficult] == "0" * self.difficult
+
+    def get_latest_block(self):
+        return self.chain[-1]
+
+    # Минер функциясы
+    @staticmethod
+    def miner_process(blockchain1):
+        while True:
+            # Attempt to mine a new block
+            new_block = blockchain1.mine_block()
+            if new_block:
+                print(f"Miner mined a new block")
+            # Sleep to simulate time between mining attempts
+            time.sleep(1)
 
 
-app = Flask(__name__)
+# Flask серверін жасау
+app1 = Flask(__name__)
 
 
-@app.route('/')
+@app1.route('/')
 def home():
     return "Welcome to the Blockchain Server!"  # Негізгі бет
 
 
-@app.route('/blockchain')
-def blockchain():
-    return "Blockchain functionality will go here."
-
-
-app.config['DEBUG'] = True  # Даму режимін қосу
-
-# Блокчейнді жасау
-blockchain = Blockchain()
-
-
-# 4
-@app.route('/mine_block', methods=['GET'])
-def mine_block():
-    previous_block = blockchain.get_previous_block()
-    previous_proof = previous_block['proof']
-    proof = blockchain.proof_of_work(previous_proof)
-    previous_hash = blockchain.hash(previous_block)
-
-    # Транзакция қосу
-    blockchain.add_transaction(sender="0", receiver="node_address", amount=1)
-
-    # Жаңа блокты жасау
-    block = blockchain.create_block(proof, previous_hash)
+@app1.route('/get_chain', methods=['GET'])
+def get_chain():
     response = {
-        'message': 'Түйін жаңа блокты қосты',
-        'index': block['index'],
-        'timestamp': block['timestamp'],
-        'transactions': block['transactions'],
-        'proof': block['proof'],
-        'previous_hash': block['previous_hash']
+        'chain': blockchain.chain,
+        'length': len(blockchain.chain)
     }
     return jsonify(response), 200
 
 
-@app.route('/send_transaction', methods=['POST'])
+app1.config['DEBUG'] = True  # Даму режимін қосу
+
+
+# 4
+@app1.route('/mine_block', methods=['GET'])
+def mine_block():
+    previous_block = blockchain.get_previous_block()
+    previous_proof = previous_block['proof_of_work']
+    proof = blockchain.proof_of_work(previous_proof)
+    previous_hashh = blockchain.hash(previous_block)
+
+    # Миннингке сыйақы қосу
+    blockchain.add_transaction(sender="0",
+                               amount=0, fee=0, recipient=0)
+
+    block = blockchain.create_block(proof, previous_hashh)
+    response = {
+        'message': 'Түйін жаңа блокты қосты',
+        'index': block.index,
+        'timestamp': block.timestamp,
+        'transactions': block.transactions,
+        'previous_hash': block.previous_hash
+    }
+
+    return jsonify(response), 200
+
+
+# GUI және Flask серверін бірге іске қосу үшін
+def run_flask():
+    app = Flask(__name__)
+
+    @app1.route('/')
+    def index1():
+        return "Blockchain Node Active"
+
+    app.run(host='0.0.0.0', port=5001)
+
+
+@app1.route('/send_transaction', methods=['POST'])
 def send_transaction():
     data = request.get_json()
 
@@ -236,8 +409,11 @@ def send_transaction():
     if amount <= 0:
         return jsonify({'error': 'Amount must be greater than 0'}), 400
 
+    blockchain.add_transaction(sender, receiver, amount, 0)
+    return jsonify({'message': f'Transaction will be added to Block '}), 201
 
-@app.route('/explorer', methods=['GET'])
+
+@app1.route('/explorer', methods=['GET'])
 def explorer():
     chain = blockchain.chain
     blocks_info = []
@@ -254,29 +430,28 @@ def explorer():
     return jsonify(blocks_info), 200
 
 
-# Блоктарды көрсету үшін API қосу
-@app.route('/get_chain', methods=['GET'])
-def get_chain():
-    response = {
-        'chain': blockchain.chain,
-        'length': len(blockchain.chain)
-    }
-    return jsonify(response), 200
+# Блокчейн Құрастырушысын GUI арқылы көрсету
 
-
-# Блокчейн Құрастырушысын GUI арқылы көрсету
 class BlockchainExplorer(tk.Tk):
-    def __init__(self, blockchain):
+    def __init__(self, blockchain1):
         super().__init__()
-        self.blockchain = blockchain
-        self.title("Блокчейн Көрсетуші")
+        self.block_info_label = None
+        self.add_transaction_label = None
+        self.sender_label = None
+        self.sender_entry = None
+        self.receiver_label = None
+        self.receiver_entry = None
+        self.amount_label = None
+        self.amount_entry = None
+        self.add_transaction_button = None
+        self.validate_button = None
+        self.blockchain = blockchain1
+        self.title("Блокчейн Көрсетуші")
         self.geometry("600x600")
 
-        # GUI компоненттерін жасау
         self.create_widgets()
 
     def create_widgets(self):
-        # Әр блоктың және транзакцияның мәліметтерін көрсету
         self.block_info_label = tk.Label(self, text="", anchor="w", justify=tk.LEFT)
         self.block_info_label.pack(pady=10)
 
@@ -304,12 +479,10 @@ class BlockchainExplorer(tk.Tk):
         self.add_transaction_button = tk.Button(self, text="Транзакция қосу", command=self.add_transaction)
         self.add_transaction_button.pack(pady=20)
 
-        # Блокчейнді тексеру үшін батырма
-        self.validate_button = tk.Button(self, text="Блокчейнді тексеру", command=self.validate_blockchain)
-        self.validate_button.pack(pady=10)
+        # Блокчейнді тексеру үшін батырма
 
     def add_transaction(self):
-        # Пайдаланушының енгізу өрістерінен транзакция мәліметтерін алу
+        # Пайдаланушының енгізу өрістерінен транзакция мәліметтерін алу
         sender = self.sender_entry.get()
         receiver = self.receiver_entry.get()
         try:
@@ -322,7 +495,7 @@ class BlockchainExplorer(tk.Tk):
             transaction = Transaction(sender, receiver, amount)
             self.blockchain.add_pending_transaction(transaction)
 
-            # Транзакцияны қосқаннан кейін жаңа блок жасау
+            # Транзакцияны қосқаннан кейін жаңа блок жасау
             self.blockchain.create_new_block(f"Блок {len(self.blockchain.chain)} Мәліметтері")
 
             # Енгізу өрістерін тазалау
@@ -333,19 +506,8 @@ class BlockchainExplorer(tk.Tk):
             # GUI-ді жаңарту: жаңа блок және транзакция мәліметтерін көрсету
             self.update_display()
 
-    def validate_blockchain(self):
-        # Блокчейннің дұрыстығын тексеру
-        is_valid = self.blockchain.validate_chain()
-        if is_valid:
-            result_text = "Блокчейн дұрыс!"
-        else:
-            result_text = "Блокчейнде қателер бар!"
-
-        # Нәтижені көрсету
-        self.block_info_label.config(text=result_text)
-
     def update_display(self):
-        # Блокчейннің жаңартылған мәліметтерін көрсету
+        # Блокчейннің жаңартылған мәліметтерін көрсету
         block_info = ""
         for block in self.blockchain.chain:
             block_info += f"Блок {block.index}:\nХэш: {block.hash}\nУақыт таңбасы: {block.timestamp}\nМәліметтер: {block.data}\n"
@@ -357,37 +519,37 @@ class BlockchainExplorer(tk.Tk):
 
 
 class WalletGUI:
-    def __init__(self, root):
+    def __init__(self, root1):
         self.wallet = Wallet()
-        self.root = root
+        self.root = root1
         self.root.title("Әмиян")
 
-        # Баланс көрсету
+        # Display balance
         self.balance_label = tk.Label(root, text=f"Баланс: {self.wallet.balance} BTC", font=("Arial", 14))
         self.balance_label.pack()
 
-        # Ашық кілт немесе адрес
+        # Display public key (address)
         self.address_label = tk.Label(root, text=f"Ашық кілт (Адрес): {self.wallet.address}")
         self.address_label.pack()
 
-        # Алушының аты
+        # Recipient's name
         self.receiver_label = tk.Label(root, text="Алушының аты:")
         self.receiver_label.pack()
         self.receiver_entry = tk.Entry(root)
         self.receiver_entry.pack()
 
-        # Сома
+        # Amount
         self.amount_label = tk.Label(root, text="Сома:")
         self.amount_label.pack()
         self.amount_entry = tk.Entry(root)
         self.amount_entry.pack()
 
-        # Жіберу батырмасы
+        # Send button
         self.send_button = tk.Button(root, text="Жіберу", command=self.send_transaction)
         self.send_button.pack()
 
     def send_transaction(self):
-        """Транзакция жасау және шифрлау"""
+        """Create and encrypt a transaction"""
         receiver = self.receiver_entry.get()
         amount = self.amount_entry.get()
 
@@ -403,9 +565,8 @@ class WalletGUI:
         transaction_data = f"{receiver} {amount} BTC"
         signature = self.wallet.sign_transaction(transaction_data)
 
-        # Верификация жасау (өзіне тексеру)
-        if self.wallet.verify_transaction(transaction_data, signature, self.wallet.public_key):
-
+        # Verify the transaction (self-verification)
+        if self.wallet.verify_transaction(transaction_data, signature):
             encrypted_transaction = self.wallet.encrypt_data(transaction_data)
             decrypted_transaction = self.wallet.decrypt_data(encrypted_transaction)
 
@@ -419,12 +580,30 @@ class WalletGUI:
             messagebox.showerror("Қате", "Транзакция расталмады!")
 
 
-# GUI-ді іске қосу
 if __name__ == "__main__":
+    # Start the Flask server in a separate thread
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    # Initialize the blockchain
+    blockchain = Blockchain(difficult=3)
+
+    # Add transactions with fees
+    blockchain.add_transaction("Alice", "Bob", 10, fee=2)
+    blockchain.add_transaction("Charlie", "Dave", 30, fee=3)
+
+    # Start miner processes
+    miner1 = multiprocessing.Process(target=miner_process, args=(blockchain, "Miner1"))
+    miner2 = multiprocessing.Process(target=miner_process, args=(blockchain, "Miner2"))
+
+    miner1.start()
+    miner2.start()
+
+    print("Blockchain is valid:", blockchain.valid_chain())
+
+    # Start the Tkinter GUI
+
     root = tk.Tk()
     gui = WalletGUI(root)
     root.mainloop()
-    app.run(host='0.0.0.0', port=5000)
-    app.run(debug=True)
-app = BlockchainExplorer(blockchain)
-app.mainloop()
